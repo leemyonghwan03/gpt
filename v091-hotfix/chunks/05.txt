@@ -1,0 +1,73 @@
+:p id="33"><hp:run><hp:t>SERVER-01</hp:t></hp:run></hp:p></hp:subList><hp:cellAddr colAddr="0" rowAddr="1"/><hp:cellSpan colSpan="1" rowSpan="1"/></hp:tc>
+<hp:tc><hp:subList><hp:p id="34"><hp:run><hp:t>양호</hp:t></hp:run></hp:p></hp:subList><hp:cellAddr colAddr="1" rowAddr="1"/><hp:cellSpan colSpan="1" rowSpan="1"/></hp:tc>
+<hp:tc><hp:subList><hp:p id="35"><hp:run><hp:t></hp:t></hp:run></hp:p></hp:subList><hp:cellAddr colAddr="2" rowAddr="1"/><hp:cellSpan colSpan="1" rowSpan="1"/></hp:tc>
+</hp:tr></hp:tbl></hp:run></hp:p></hs:sec>'''
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with ZipFile(path, "w") as zf:
+        zf.writestr("mimetype", MIMETYPE, compress_type=ZIP_STORED)
+        zf.writestr("version.xml", version, compress_type=ZIP_DEFLATED)
+        zf.writestr("Contents/content.hpf", content, compress_type=ZIP_DEFLATED)
+        zf.writestr("Contents/header.xml", header, compress_type=ZIP_DEFLATED)
+        zf.writestr("Contents/section0.xml", section, compress_type=ZIP_DEFLATED)
+
+
+
+NEW_DOCUMENT_SHORTCUT = "%n"   # official Hangul: Alt+N
+SAVE_AS_SHORTCUT = "%v"        # official Hangul: Alt+V
+TABLE_SELECT_ALL_KEYS = "{F5}{F5}{F5}"
+
+
+def documents_directory() -> Path:
+    if sys.platform == "win32":
+        try:
+            from win32com.shell import shell, shellcon
+            value = shell.SHGetFolderPath(0, shellcon.CSIDL_PERSONAL, 0, 0)
+            if value:
+                return Path(value)
+        except Exception:
+            pass
+    return Path.home() / "Documents"
+
+
+def next_hwpx_path() -> Path:
+    folder = documents_directory() / "DocumentAssistant"
+    folder.mkdir(parents=True, exist_ok=True)
+    base = f"새문서_{datetime.now():%Y%m%d_%H%M%S}"
+    path = folder / f"{base}.hwpx"
+    n = 1
+    while path.exists():
+        path = folder / f"{base}_{n:02d}.hwpx"; n += 1
+    return path
+
+
+def validate_hwpx_file(path: Path) -> bool:
+    try:
+        with ZipFile(path) as zf:
+            if "mimetype" not in zf.namelist(): return False
+            mt = zf.read("mimetype").decode("utf-8", "ignore").lower()
+            return "hwp" in mt and "zip" in mt and zf.testzip() is None
+    except Exception:
+        return False
+
+
+def discover_hwp_exe() -> tuple[str|None,str]:
+    if sys.platform != "win32": return None,"non-windows"
+    p=shutil.which("Hwp.exe") or shutil.which("hwp.exe")
+    if p and Path(p).exists(): return str(Path(p).resolve()),"PATH"
+    try:
+        import winreg
+        for hive,key in [
+            (winreg.HKEY_LOCAL_MACHINE,r"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Hwp.exe"),
+            (winreg.HKEY_LOCAL_MACHINE,r"SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Hwp.exe"),
+            (winreg.HKEY_CURRENT_USER,r"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Hwp.exe")]:
+            try:
+                with winreg.OpenKey(hive,key) as k:
+                    v,_=winreg.QueryValueEx(k,None); q=Path(str(v).strip('"'))
+                    if q.exists(): return str(q.resolve()),"registry"
+            except Exception: pass
+    except Exception: pass
+    roots=[Path(v) for n in ("ProgramFiles","ProgramFiles(x86)","ProgramW6432") if (v:=os.environ.get(n))]
+    for root in roots:
+        for office,hoffice in [("Office 2024","HOffice130"),("Office 2022","HOffice120"),("Office 2020","HOffice110"),("Office 2018","HOffice100"),("Office NEO","HOffice96")]:
+            q=root/"Hnc"/office/hoffice/"Bin"/"Hwp.exe"
+            if q.exists(): return str(q.resolve()),"known
