@@ -1,0 +1,112 @@
+name: document-writer-v09-windows-verify
+
+on:
+  push:
+    branches:
+      - document-writer-v09-win-verify-20260825
+  workflow_dispatch:
+
+jobs:
+  windows-verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Reconstruct validation harness
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "$PWD\document-writer-v09\harness_*.b64" | Sort-Object Name
+          if ($parts.Count -ne 2) { throw "Expected 2 harness chunks, got $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          $bytes = [Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes("$PWD\v09-harness.zip", $bytes)
+          Expand-Archive "$PWD\v09-harness.zip" "$PWD\v09-harness" -Force
+          Get-ChildItem "$PWD\v09-harness"
+
+      - name: Install Windows dependencies
+        working-directory: v09-harness
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -c "import tkinter,lxml,win32api,win32con,win32gui,win32process,win32com.client,pythoncom,pywintypes,pywinauto; print('WINDOWS_IMPORTS=PASS')"
+
+      - name: Compile and Python self-test
+        working-directory: v09-harness
+        shell: pwsh
+        run: |
+          python -m py_compile companion_v09.py
+          python companion_v09.py --selftest
+          if ($LASTEXITCODE -ne 0) { throw "Python self-test failed: $LASTEXITCODE" }
+          Get-Content WINDOWS_SELFTEST_PASS.txt
+
+      - name: Build Windows EXE
+        working-directory: v09-harness
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --onedir --name DocumentAssistant `
+            --hidden-import pythoncom `
+            --hidden-import pywintypes `
+            --hidden-import win32api `
+            --hidden-import win32con `
+            --hidden-import win32gui `
+            --hidden-import win32process `
+            --hidden-import win32com.client `
+            --hidden-import pywinauto `
+            companion_v09.py
+          if (-not (Test-Path "dist\DocumentAssistant\DocumentAssistant.exe")) { throw "DocumentAssistant.exe missing" }
+
+      - name: Run packaged EXE self-test
+        working-directory: v09-harness
+        shell: pwsh
+        run: |
+          $exe = "$PWD\dist\DocumentAssistant\DocumentAssistant.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList "--selftest" -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            if (Test-Path "dist\DocumentAssistant\WINDOWS_STARTUP_ERROR.txt") { Get-Content "dist\DocumentAssistant\WINDOWS_STARTUP_ERROR.txt" }
+            throw "Packaged EXE self-test failed: $($proc.ExitCode)"
+          }
+          if (-not (Test-Path "dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt")) { throw "Packaged self-test marker missing" }
+          Get-Content "dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt"
+
+      - name: Verify v0.9 markers
+        working-directory: v09-harness
+        shell: pwsh
+        run: |
+          $marker = Get-Content "dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt" -Raw
+          $required = @(
+            "WINDOWS_SELFTEST=PASS",
+            "VERSION=0.9",
+            "FROZEN=True",
+            "HWPX_PARSE=PASS",
+            "HWPX_FIELD_DETECT=PASS",
+            "HWPX_TABLE_INSPECT=PASS",
+            "HWPX_TEMPLATE_WRITE=PASS",
+            "NEW_DOCUMENT_AUTOLINK_CODEPATH=PASS",
+            "TABLE_AUTO_FORMAT_CODEPATH=PASS",
+            "OFFICIAL_ALT_N=PASS",
+            "OFFICIAL_ALT_V=PASS"
+          )
+          foreach ($item in $required) {
+            if (-not $marker.Contains($item)) { throw "Missing verification marker: $item" }
+          }
+          "WINDOWS_V09_GATE=PASS" | Add-Content "dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt"
+
+      - name: Archive verified build
+        working-directory: v09-harness
+        shell: pwsh
+        run: |
+          Compress-Archive "dist\DocumentAssistant\*" "$PWD\DocumentAssistant-v0.9-Windows-x64-VERIFIED.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocumentAssistant-v0.9-Windows-x64-VERIFIED
+          path: v09-harness/DocumentAssistant-v0.9-Windows-x64-VERIFIED.zip
+          if-no-files-found: error
