@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
+
+from lxml import etree
+
+VERSION = "0.9.1"
+APP_TITLE = f"Document Assistant v{VERSION}"
+MIMETYPE = "application/hwp+zip"
+
+ACTIONS = {
+    "문서": [
+        ("문서 분석", True), ("양식 분석", True), ("문서 정보", True), ("일괄 치환", True),
+        ("날짜/담당자 변경", True), ("문서 자동 정리", False), ("문서 비교", False), ("HWP ↔ HWPX", False),
+    ],
+    "표": [
+        ("표 구조 분석", True), ("빈 셀 검사", True), ("병합셀 검사", True), ("표 자동 정리", True),
+        ("열 너비 맞춤", True), ("행 높이 맞춤", True), ("머리행 강조", False), ("Excel → 한글", False),
+    ],
+    "작성": [
+        ("기존 양식으로 작성", True), ("Field 자동 감지", True), ("원본 복제", True), ("파일명 자동 추천", True),
+        ("템플릿 정보", True), ("반복문서 생성", False), ("표 데이터 채우기", False), ("AI 초안 작성", False),
+    ],
+    "검사": [
+        ("저장 전 검사", True), ("원본 보호 확인", True), ("문서 구조 검사", True), ("빈 Field 검사", True),
+        ("패키지 무결성", True), ("객체 현황", True), ("진단 로그", False), ("Native 연결 상태", True),
+    ],
+}
+ACTION_COUNT = sum(len(v) for v in ACTIONS.values())
+READY_ACTION_COUNT = sum(1 for v in ACTIONS.values() for _, ready in v if ready)
+
+
+def frozen_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def safe_xml(data: bytes):
+    return etree.fromstring(
+        data,
+        parser=etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+            huge_tree=False,
+            recover=False,
+        ),
+    )
+
+
+def lname(node) -> str:
+    return etree.QName(node).localname
+
+
+def validate_zip(path: Path) -> dict:
+    with ZipFile(path) as zf:
+        infos = zf.infolist()
+        if len(infos) > 10000:
+            raise ValueError("ZIP entry limit exceeded")
+        total = 0
+        seen = set()
+        for info in infos:
+            name = info.filename.replace("\\", "/")
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError(f"unsafe ZIP path: {name}")
+            if name in seen:
+                raise ValueError(f"duplicate ZIP entry: {name}")
+            seen.add(name)
+            total += info.file_size
+            if info.file_size > 128 * 1024 * 1024:
+                raise ValueError(f"entry too large: {name}")
+            if total > 512 * 1024 * 1024:
+                raise ValueError("ZIP total size limit exceeded")
+            if info.compress_size and info.file_size > 1024 * 1024:
+                if info.file_size / info.compress_size > 200:
+                    raise ValueError(f"suspicious compression ratio: {name}")
+        bad = zf.testzip()
+        if bad:
+            raise ValueError(f"CRC failure: {bad}")
+        return {"entries": len(infos), "names": [i.filename for i in infos]}
+
+
+@dataclass
+class Field:
+    name: str
+    value: str
+    field_type: str
+    confidence: float
+    part: str
+    paragraph_id: str | None
+    run_index: int | None
+    old_value: str
+
+
+KNOWN = {
+    "작성일": "date", "작성일자": "date", "일자": "date", "날짜": "date",
+    "점검일": "
