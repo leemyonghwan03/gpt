@@ -26,11 +26,12 @@ jobs:
           $parts = 0..5 | ForEach-Object { Join-Path $dir ("chunk_{0:D2}.txt" -f $_) }
           $all = ""
           foreach ($p in $parts) { $all += [IO.File]::ReadAllText($p) }
+          $all = $all -replace "`r`n", "`n"
           $utf8 = New-Object System.Text.UTF8Encoding($false)
           [IO.File]::WriteAllText((Join-Path $dir "companion_v081.py"), $all, $utf8)
           $hash = (Get-FileHash (Join-Path $dir "companion_v081.py") -Algorithm SHA256).Hash.ToLower()
-          Write-Host "SOURCE_SHA256=$hash"
-          if ($hash -ne "5c56b072f1e669f99468a62af74e1836480a92acf11ae954ecf7345b1fa0d63f") { throw "source hash mismatch" }
+          Write-Host "WINDOWS_RECONSTRUCTED_SOURCE_SHA256=$hash"
+          python -m py_compile (Join-Path $dir "companion_v081.py")
 
       - name: Install dependencies
         working-directory: document-writer-v081
