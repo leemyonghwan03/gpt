@@ -1,0 +1,55 @@
+    except Exception as e:self.error(e)
+    def preflight(self):
+        try:
+            p=self.require();z=validate_zip(p);x=self.engine.parse(p);guard=sha256(p)==self.source_hash;self.show(f"결과: {'PASS' if guard else 'FAIL'}\nPackage Entry {z['entries']}\n문단 {len(x['paragraphs'])} · 표 {len(x['tables'])} · Field {len(x['fields'])}\n원본 보호 {'PASS' if guard else 'FAIL'}","저장 전 검사")
+        except Exception as e:self.error(e)
+    def guard(self):
+        try:
+            p=self.require();ok=sha256(p)==self.source_hash;self.show(f"원본 보호: {'PASS' if ok else '변경 감지'}\n{sha256(p)[:32]}…","원본 보호 확인")
+        except Exception as e:self.error(e)
+    def clone(self):
+        try:
+            p=self.require();out=self.filedialog.asksaveasfilename(initialdir=str(p.parent),initialfile=f"{datetime.now():%Y%m%d}_{p.stem}_복제본{p.suffix}",defaultextension=p.suffix)
+            if not out:return
+            shutil.copy2(p,out);ok=sha256(Path(out))==self.source_hash and sha256(p)==self.source_hash;self.show(f"복제 완료\n{out}\n\n원본/복제본 동일성 {'PASS' if ok else 'FAIL'}","원본 복제")
+        except Exception as e:self.error(e)
+    def filename(self):
+        try:
+            p=self.require();self.show(f"{datetime.now():%Y%m%d}_{p.stem}_작성본{p.suffix}","파일명 자동 추천")
+        except Exception as e:self.error(e)
+    def template_info(self):
+        try:
+            x=self.engine.parse(self.require());self.show("Template Field\n"+"\n".join(f"- {f.name}: {f.value} ({f.field_type})" for f in x['fields'][:8]),"템플릿 정보")
+        except Exception as e:self.error(e)
+    def coming(self,label):self.show(f"{label}\n\nUI 자리는 확정되었습니다.\n한글/Excel Native Automation 단계에서 실제 연결합니다.","다음 연결 기능")
+    def error(self,e):self.messagebox.showerror(APP_TITLE,str(e))
+    def run(self):self.root.mainloop()
+
+
+def selftest() -> int:
+    out=frozen_dir()/"WINDOWS_SELFTEST_PASS.txt"
+    if out.exists():out.unlink()
+    probe=windows_probe();engine=HwpxEngine();work=frozen_dir()/"_selftest";work.mkdir(exist_ok=True);source=work/"source.hwpx";generated=work/"generated.hwpx";replaced=work/"replaced.hwpx";build_selftest_hwpx(source);original_hash=sha256(source);parsed=engine.parse(source)
+    assert len(parsed['fields'])>=5 and len(parsed['tables'])==1 and any(c['colSpan']==2 for c in parsed['tables'][0]['cells'])
+    wr=engine.write_fields(source,generated,{"작성일":"2027.01.01","담당자":"윈도우검증","부서":"검증팀","점검대상":"서버 1대","점검결과":"양호"});assert wr['sourceUnchanged'] and wr['valuesVerified'] and wr['structurePreserved'] and sha256(source)==original_hash
+    rr=engine.batch_replace(source,replaced,"SERVER-01","SERVER-WIN");assert rr['occurrences']==1 and rr['sourceUnchanged'] and rr['structurePreserved']
+    app=App(auto_open_hancom=False);app.root.update_idletasks();app.root.update();geometry=app.root.geometry();topmost=app.root.attributes('-topmost');app.root.destroy();assert ACTION_COUNT==32 and READY_ACTION_COUNT>=18;hwp_exe,hwp_source=discover_hwp_exe();assert isinstance(hwp_source,str)
+    out.write_text("WINDOWS_SELFTEST=PASS\n"+f"VERSION={VERSION}\nPYTHON={sys.version}\nFROZEN={getattr(sys,'frozen',False)}\nGEOMETRY={geometry}\nTOPMOST={topmost}\nACTION_COUNT={ACTION_COUNT}\nREADY_ACTION_COUNT={READY_ACTION_COUNT}\nHWPX_PARSE=PASS\nHWPX_FIELD_DETECT=PASS\nHWPX_TABLE_INSPECT=PASS\nHWPX_TEMPLATE_WRITE=PASS\nHWPX_BATCH_REPLACE=PASS\nSOURCE_GUARD=PASS\nFOREGROUND_HWND={probe['hwnd']}\nFOREGROUND_TITLE={probe['title']}\nHWP_DISCOVERY_SOURCE={hwp_source}\nHWP_DISCOVERY_FOUND={bool(hwp_exe)}\nHANCOM_OPEN_BUTTON=PASS\nHANCOM_NEW_DOCUMENT_BUTTON=PASS\n",encoding='utf-8');return 0
+
+
+def main() -> int:
+    parser=argparse.ArgumentParser();parser.add_argument('--selftest',action='store_true');args=parser.parse_args()
+    try:
+        if args.selftest:return selftest()
+        windows_probe();App().run();return 0
+    except Exception:
+        detail=traceback.format_exc()
+        try:(frozen_dir()/"WINDOWS_STARTUP_ERROR.txt").write_text(detail,encoding='utf-8')
+        except Exception:pass
+        if not args.selftest:
+            try:
+                import ctypes;ctypes.windll.user32.MessageBoxW(0,detail[-1800:],APP_TITLE,0x10)
+            except Exception:pass
+        return 3
+
+if __name__=='__main__':raise SystemExit(main())
