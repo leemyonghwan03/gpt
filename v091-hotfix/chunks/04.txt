@@ -1,0 +1,43 @@
+e(self, source: Path, output: Path, old: str, new: str) -> dict:
+        if not old: raise ValueError("찾을 문자열이 비어 있습니다.")
+        if source.resolve() == output.resolve(): raise ValueError("원본으로 덮어쓸 수 없습니다.")
+        before_hash = sha256(source)
+        before = self.parse(source)
+        with ZipFile(source, "r") as zin:
+            infos = zin.infolist(); patched = {}; occurrences = 0
+            for info in infos:
+                if not re.fullmatch(r"Contents/section\d+\.xml", info.filename, re.I): continue
+                root = safe_xml(zin.read(info.filename)); count = 0
+                for n in root.iter():
+                    if lname(n) == "t" and n.text and old in n.text:
+                        c = n.text.count(old); n.text = n.text.replace(old, new); count += c; occurrences += c
+                if count: patched[info.filename] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+            if not occurrences: raise ValueError(f"'{old}' 문자열을 찾지 못했습니다.")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with ZipFile(output, "w") as zout:
+                for info in infos: zout.writestr(info, patched.get(info.filename, zin.read(info.filename)))
+        after = self.parse(output)
+        return {
+            "occurrences": occurrences, "sourceUnchanged": sha256(source) == before_hash,
+            "structurePreserved": len(before["paragraphs"]) == len(after["paragraphs"]) and len(before["tables"]) == len(after["tables"]),
+            "output": str(output),
+        }
+
+
+def build_selftest_hwpx(path: Path):
+    version = '''<?xml version="1.0" encoding="UTF-8"?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" major="5" minor="1" micro="1" buildNumber="0"/>'''
+    content = '''<?xml version="1.0" encoding="UTF-8"?><opf:package xmlns:opf="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/"><opf:metadata><dc:title>보안점검 결과</dc:title></opf:metadata></opf:package>'''
+    header = '''<?xml version="1.0" encoding="UTF-8"?><hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head"><hh:refList><hh:fontfaces><hh:fontface lang="HANGUL"><hh:font id="0" face="맑은 고딕"/></hh:fontface></hh:fontfaces><hh:charProperties><hh:charPr id="0" height="1000"/><hh:charPr id="1" height="1800"><hh:bold/></hh:charPr></hh:charProperties></hh:refList></hh:head>'''
+    section = '''<?xml version="1.0" encoding="UTF-8"?>
+<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">
+<hp:p id="1"><hp:run charPrIDRef="1"><hp:t>보안점검 결과</hp:t></hp:run></hp:p>
+<hp:p id="2"><hp:run charPrIDRef="0"><hp:t>작성일 : </hp:t></hp:run><hp:run charPrIDRef="0"><hp:t>2026.08.25</hp:t></hp:run></hp:p>
+<hp:p id="3"><hp:run charPrIDRef="0"><hp:t>담당자 : 홍길동</hp:t></hp:run></hp:p>
+<hp:p id="4"><hp:run charPrIDRef="0"><hp:t>부서 : 정보보안팀</hp:t></hp:run></hp:p>
+<hp:p id="5"><hp:run charPrIDRef="0"><hp:t>점검대상 : 서버 25대</hp:t></hp:run></hp:p>
+<hp:p id="6"><hp:run charPrIDRef="0"><hp:t>점검결과 : 취약 4건</hp:t></hp:run></hp:p>
+<hp:p id="7"><hp:run charPrIDRef="0"><hp:tbl id="20"><hp:tr>
+<hp:tc><hp:subList><hp:p id="31"><hp:run><hp:t>서버명</hp:t></hp:run></hp:p></hp:subList><hp:cellAddr colAddr="0" rowAddr="0"/><hp:cellSpan colSpan="1" rowSpan="1"/></hp:tc>
+<hp:tc><hp:subList><hp:p id="32"><hp:run><hp:t>결과</hp:t></hp:run></hp:p></hp:subList><hp:cellAddr colAddr="1" rowAddr="0"/><hp:cellSpan colSpan="2" rowSpan="1"/></hp:tc>
+</hp:tr><hp:tr>
+<hp:tc><hp:subList><hp:p
