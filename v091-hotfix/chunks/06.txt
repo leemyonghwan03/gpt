@@ -1,0 +1,101 @@
+-path"
+    return None,"not-found"
+
+
+def hwp_windows() -> list[int]:
+    if sys.platform != "win32": return []
+    import win32gui
+    result=[]
+    def cb(hwnd,_):
+        if win32gui.IsWindowVisible(hwnd):
+            title=(win32gui.GetWindowText(hwnd) or "").lower()
+            if "한글" in title or ".hwp" in title or ".hwpx" in title: result.append(int(hwnd))
+    win32gui.EnumWindows(cb,None); return result
+
+
+def focus_hwp() -> int|None:
+    wins=hwp_windows()
+    if not wins:return None
+    import win32con,win32gui
+    hwnd=wins[-1]
+    try:
+        if win32gui.IsIconic(hwnd):win32gui.ShowWindow(hwnd,win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd);time.sleep(.1);return hwnd
+    except Exception:return None
+
+
+def send_hwp_keys(keys:str):
+    from pywinauto.keyboard import send_keys
+    send_keys(keys,pause=.06,with_spaces=True)
+
+
+def launch_hwp() -> bool:
+    if focus_hwp(): return True
+    exe,_=discover_hwp_exe()
+    if not exe:return False
+    subprocess.Popen([exe],cwd=str(Path(exe).parent),creationflags=getattr(subprocess,"CREATE_NEW_PROCESS_GROUP",0))
+    deadline=time.time()+8
+    while time.time()<deadline:
+        time.sleep(.25)
+        if focus_hwp(): return True
+    return False
+
+
+def create_new_hwpx_com(target:Path):
+    if sys.platform!="win32": return None
+    import pythoncom,win32com.client
+    pythoncom.CoInitialize()
+    for progid in ("HWPFrame.HwpObject","HWPFrame.HwpObject.2"):
+        try:
+            hwp=win32com.client.Dispatch(progid)
+            doc=hwp.XHwpDocuments.Add(False)
+            try:doc.SetActive_XHwpDocument()
+            except Exception:pass
+            try:hwp.XHwpWindows.Active_XHwpWindow.Visible=1
+            except Exception:
+                try:hwp.XHwpWindows.Item(0).Visible=1
+                except Exception:pass
+            ok=hwp.SaveAs(str(target.resolve()),"HWPX","")
+            deadline=time.time()+5
+            while time.time()<deadline:
+                if validate_hwpx_file(target): return hwp
+                time.sleep(.2)
+        except Exception:pass
+    return None
+
+
+def create_new_hwpx_uia(target:Path) -> bool:
+    if not launch_hwp():return False
+    if not focus_hwp():return False
+    send_hwp_keys(NEW_DOCUMENT_SHORTCUT);time.sleep(.5);send_hwp_keys(SAVE_AS_SHORTCUT)
+    from pywinauto import Desktop
+    desktop=Desktop(backend="uia");deadline=time.time()+8;dlg=None
+    while time.time()<deadline:
+        for w in desktop.windows():
+            title=(w.window_text() or "").lower()
+            if "다른 이름으로 저장" in title or "save as" in title: dlg=w;break
+        if dlg:break
+        time.sleep(.2)
+    if not dlg:return False
+    edits=[]
+    try:edits.append(dlg.child_window(auto_id="1001",control_type="Edit"))
+    except Exception:pass
+    try:edits += dlg.descendants(control_type="Edit")
+    except Exception:pass
+    typed=False
+    for e in edits:
+        try:e.set_edit_text(str(target.resolve()));typed=True;break
+        except Exception:pass
+    try:
+        for combo in dlg.descendants(control_type="ComboBox"):
+            try:
+                for item in combo.item_texts():
+                    if "hwpx" in (item or "").lower():combo.select(item);raise StopIteration
+            except StopIteration:break
+            except Exception:pass
+    except Exception:pass
+    clicked=False
+    try:
+        for b in dlg.descendants(control_type="Button"):
+            label=(b.window_text() or "").lower()
+            if label.startswith("저장") or label.startswith(
