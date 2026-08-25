@@ -56,8 +56,8 @@ jobs:
           $env:DOCUMENT_WRITER_SELFTEST = "1"
           python bootstrap_companion.py
           if ($LASTEXITCODE -ne 0) { throw "Python production self-test failed: $LASTEXITCODE" }
-          if (-not (Test-Path "runtime_data\WINDOWS_SELFTEST_PASS.txt")) { throw "Python self-test marker missing" }
-          Get-Content "runtime_data\WINDOWS_SELFTEST_PASS.txt"
+          if (-not (Test-Path "WINDOWS_SELFTEST_PASS.txt")) { throw "Python self-test marker missing" }
+          Get-Content "WINDOWS_SELFTEST_PASS.txt"
 
       - name: Build full production Windows EXE
         working-directory: src
@@ -77,7 +77,7 @@ jobs:
             if (Test-Path "dist\DocumentAssistant\runtime_data\logs\companion_startup.log") { Get-Content "dist\DocumentAssistant\runtime_data\logs\companion_startup.log" -Tail 250 }
             throw "Packaged EXE self-test failed: $($proc.ExitCode)"
           }
-          $marker = "dist\DocumentAssistant\runtime_data\WINDOWS_SELFTEST_PASS.txt"
+          $marker = "dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt"
           if (-not (Test-Path $marker)) { throw "Packaged marker missing" }
           $text = Get-Content $marker -Raw
           $required = @("WINDOWS_SELFTEST=PASS","VERSION=0.9.1","FROZEN=True","FULL_PROJECT_BUILD=PASS","LINK_WITHOUT_PARSE=PASS","FORMAT_DETECTOR=PASS","HWPX_PARSE=PASS","HWPX_TEMPLATE_WRITE=PASS","NEW_DOCUMENT_AUTOLINK_CODEPATH=PASS","TABLE_AUTO_FORMAT_CODEPATH=PASS")
