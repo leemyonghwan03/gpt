@@ -28,7 +28,7 @@ jobs:
           foreach ($c in $chunks) { $content += Get-Content $c -Raw }
           [IO.File]::WriteAllText((Join-Path $PWD 'companion_v08.py'), $content, [Text.UTF8Encoding]::new($false))
           python -m py_compile companion_v08.py
-          python -c "from companion_v08 import ACTION_COUNT,READY_ACTION_COUNT; assert ACTION_COUNT == 32; assert READY_ACTION_COUNT >= 18; print('ACTION_PANEL=PASS', ACTION_COUNT, READY_ACTION_COUNT)"
+          Write-Host 'SOURCE_REBUILD=PASS'
 
       - name: Install Windows dependencies
         working-directory: document-writer-win-v08
@@ -37,6 +37,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
           python -c "import tkinter,lxml,win32gui,win32com.client,pythoncom,pywinauto; print('WINDOWS_IMPORTS=PASS')"
+          python -c "from companion_v08 import ACTION_COUNT,READY_ACTION_COUNT; assert ACTION_COUNT == 32; assert READY_ACTION_COUNT >= 18; print('ACTION_PANEL=PASS', ACTION_COUNT, READY_ACTION_COUNT)"
 
       - name: Python v0.8 self-test
         working-directory: document-writer-win-v08
