@@ -1,0 +1,119 @@
+name: document-writer-v081-windows-verify
+
+on:
+  push:
+    branches:
+      - document-writer-v081-winverify
+  workflow_dispatch:
+
+jobs:
+  windows-verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Reconstruct source
+        shell: pwsh
+        run: |
+          $dir = Join-Path $PWD "document-writer-v081"
+          $parts = 0..5 | ForEach-Object { Join-Path $dir ("chunk_{0:D2}.txt" -f $_) }
+          $all = ""
+          foreach ($p in $parts) { $all += [IO.File]::ReadAllText($p) }
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText((Join-Path $dir "companion_v081.py"), $all, $utf8)
+          $hash = (Get-FileHash (Join-Path $dir "companion_v081.py") -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SOURCE_SHA256=$hash"
+          if ($hash -ne "5c56b072f1e669f99468a62af74e1836480a92acf11ae954ecf7345b1fa0d63f") { throw "source hash mismatch" }
+
+      - name: Install dependencies
+        working-directory: document-writer-v081
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Python Windows self-test
+        working-directory: document-writer-v081
+        shell: pwsh
+        run: |
+          python -m py_compile companion_v081.py
+          python companion_v081.py --selftest
+          if ($LASTEXITCODE -ne 0) { throw "Python self-test failed" }
+          Get-Content WINDOWS_SELFTEST_PASS.txt
+
+      - name: Build Windows EXE
+        working-directory: document-writer-v081
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed `
+            --name DocumentAssistant `
+            --collect-all lxml `
+            --collect-submodules win32com `
+            --hidden-import pythoncom `
+            --hidden-import pywintypes `
+            --hidden-import win32api `
+            --hidden-import win32con `
+            --hidden-import win32gui `
+            --hidden-import win32process `
+            --hidden-import pywinauto `
+            companion_v081.py
+          if (-not (Test-Path "dist\DocumentAssistant\DocumentAssistant.exe")) { throw "EXE missing" }
+
+      - name: Packaged EXE self-test
+        working-directory: document-writer-v081
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "dist\DocumentAssistant\DocumentAssistant.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList "--selftest" -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            if (Test-Path "dist\DocumentAssistant\WINDOWS_STARTUP_ERROR.txt") { Get-Content "dist\DocumentAssistant\WINDOWS_STARTUP_ERROR.txt" }
+            throw "Packaged EXE self-test failed: $($proc.ExitCode)"
+          }
+          $marker = "dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt"
+          if (-not (Test-Path $marker)) { throw "self-test marker missing" }
+          $txt = Get-Content $marker -Raw
+          Write-Host $txt
+          foreach ($needle in @("WINDOWS_SELFTEST=PASS","VERSION=0.8.1","FROZEN=True","TOPMOST=1","HANCOM_OPEN_BUTTON=PASS","HANCOM_NEW_DOCUMENT_BUTTON=PASS","HWPX_TEMPLATE_WRITE=PASS")) {
+            if ($txt -notmatch [regex]::Escape($needle)) { throw "marker missing: $needle" }
+          }
+
+      - name: Prepare verified package
+        working-directory: document-writer-v081
+        shell: pwsh
+        run: |
+          @"
+          Document Assistant v0.8.1
+
+          실행: DocumentAssistant.exe
+
+          추가 기능:
+          - Companion 실행 시 한글이 없으면 Hwp.exe 자동 실행 시도
+          - [한글 열기] 버튼
+          - [새 문서] 버튼
+          - 열려 있는 한글이 있으면 [새 문서]는 Ctrl+N으로 새 문서를 생성
+          - 한글이 없으면 Hwp.exe 실행 후 새 문서 생성 시도
+
+          주의:
+          GitHub Windows runner에는 한컴오피스가 설치되어 있지 않으므로 실제 Hwp.exe 기동 성공 자체는 검증 대상이 아닙니다.
+          Windows EXE/Tk/pywin32/pywinauto/설치경로 탐색/미설치 처리/HWPX 엔진은 Windows runner에서 검증했습니다.
+          "@ | Set-Content "dist\DocumentAssistant\README_FIRST.txt" -Encoding UTF8
+          Copy-Item "WINDOWS_SELFTEST_PASS.txt" "dist\DocumentAssistant\PYTHON_WINDOWS_SELFTEST_PASS.txt" -Force
+
+      - name: Archive verified Windows build
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            "$PWD\document-writer-v081\dist\DocumentAssistant\*" `
+            "$PWD\DocumentAssistant-v0.8.1-Windows-x64-VERIFIED.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocumentAssistant-v0.8.1-Windows-x64-VERIFIED
+          path: DocumentAssistant-v0.8.1-Windows-x64-VERIFIED.zip
+          if-no-files-found: error
