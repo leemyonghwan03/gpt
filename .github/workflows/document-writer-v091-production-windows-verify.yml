@@ -1,0 +1,119 @@
+name: document-writer-v091-production-windows-verify
+
+on:
+  push:
+    branches:
+      - document-writer-v091-win-verify3-20260825
+  workflow_dispatch:
+
+jobs:
+  windows-verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Reconstruct production source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "document-writer-v091/chunks/*.part" | Sort-Object Name
+          if ($parts.Count -ne 5) { throw "Expected 5 source chunks, got $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          $bytes = [Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes("$PWD\production.tar.gz", $bytes)
+          $hash = (Get-FileHash "$PWD\production.tar.gz" -Algorithm SHA256).Hash.ToLower()
+          Write-Host "production.tar.gz sha256=$hash"
+          if ($hash -ne "0b0d6ff5db8309319fb31c477319285f9edab855a00fce4739a7483daa001913") {
+            throw "Production source hash mismatch: $hash"
+          }
+          python -c "import tarfile; tarfile.open('production.tar.gz','r:gz').extractall('src')"
+          if (-not (Test-Path "src\bootstrap_companion.py")) { throw "Production bootstrap missing" }
+          if (-not (Test-Path "src\companion\service.py")) { throw "Production service missing" }
+          if (-not (Test-Path "src\companion\format_detector.py")) { throw "Format detector missing" }
+
+      - name: Install dependencies
+        working-directory: src
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-poc.txt
+
+      - name: Production link regression gate
+        working-directory: src
+        shell: pwsh
+        run: |
+          python -c "from pathlib import Path; from zipfile import ZipFile; from companion.service import CompanionDocumentService; p=Path('runtime_link_gate.hwpx'); z=ZipFile(p,'w'); z.writestr('random.xml','<root/>'); z.close(); svc=CompanionDocumentService(); linked=svc.link(p); assert linked.format=='HWPX'; assert svc.last_content is None; print('LINK_WITHOUT_PARSE_RUNTIME=PASS', linked.detection_source, linked.detection_confidence)"
+          python -c "from companion.format_detector import detect_document_format; from companion.selftest_fixture import build_selftest_hwpx; from pathlib import Path; p=build_selftest_hwpx(Path('format_gate.hwpx')); d=detect_document_format(p); assert d.format=='HWPX' and d.confidence=='high'; print('FORMAT_DETECTOR_RUNTIME=PASS')"
+
+      - name: Python full production self-test
+        working-directory: src
+        shell: pwsh
+        run: |
+          $env:DOCUMENT_WRITER_SELFTEST = "1"
+          python bootstrap_companion.py
+          if ($LASTEXITCODE -ne 0) { throw "Python production self-test failed: $LASTEXITCODE" }
+
+      - name: Build production Windows EXE
+        working-directory: src
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean packaging\companion_windows.spec
+          if (-not (Test-Path "dist\DocumentAssistant\DocumentAssistant.exe")) {
+            throw "DocumentAssistant.exe missing"
+          }
+
+      - name: Run packaged production EXE self-test
+        working-directory: src
+        shell: pwsh
+        run: |
+          $env:DOCUMENT_WRITER_SELFTEST = "1"
+          $exe = Join-Path $PWD "dist\DocumentAssistant\DocumentAssistant.exe"
+          $proc = Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            $log = Join-Path (Split-Path $exe) "runtime_data\logs\companion_startup.log"
+            if (Test-Path $log) { Get-Content $log -Tail 250 }
+            throw "Packaged production EXE self-test failed: $($proc.ExitCode)"
+          }
+
+      - name: Verify production markers
+        working-directory: src
+        shell: pwsh
+        run: |
+          $marker = "dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt"
+          if (-not (Test-Path $marker)) { throw "Self-test marker missing" }
+          $text = Get-Content $marker -Raw
+          $required = @(
+            "WINDOWS_SELFTEST=PASS",
+            "VERSION=0.9.1",
+            "FROZEN=True",
+            "FULL_PROJECT_BUILD=PASS",
+            "LINK_WITHOUT_PARSE=PASS",
+            "FORMAT_DETECTOR=PASS",
+            "HWPX_PARSE=PASS",
+            "HWPX_TEMPLATE_WRITE=PASS",
+            "NEW_DOCUMENT_AUTOLINK_CODEPATH=PASS",
+            "TABLE_AUTO_FORMAT_CODEPATH=PASS"
+          )
+          foreach ($value in $required) {
+            if (-not $text.Contains($value)) { throw "Missing marker: $value" }
+          }
+          Get-Content $marker
+
+      - name: Archive verified production build
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            "$PWD\src\dist\DocumentAssistant\*" `
+            "$PWD\DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocumentAssistant-v0.9.1-Windows-x64-VERIFIED
+          path: DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.zip
+          if-no-files-found: error
