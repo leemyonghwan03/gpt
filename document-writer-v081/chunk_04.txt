@@ -1,0 +1,101 @@
+pady=6); tabs.add(frame,text=category)
+            for c in range(2): frame.grid_columnconfigure(c,weight=1)
+            for i,(label,ready) in enumerate(actions):
+                cmd=command_map.get(label,lambda l=label:self.coming(l)); self._btn(frame,label,cmd,ready).grid(row=i//2,column=i%2,sticky="ew",padx=3,pady=3)
+        work=tk.Frame(main,bg="white",padx=10,pady=9,highlightthickness=1,highlightbackground="#e1e5eb"); work.pack(fill="both",expand=True)
+        self.work_title=tk.Label(work,text="작업 패널",bg="white",fg="#172033",font=("Malgun Gothic",9,"bold")); self.work_title.pack(anchor="w")
+        self.work=tk.Frame(work,bg="white"); self.work.pack(fill="both",expand=True,pady=(6,0)); self.show("문서를 연결한 뒤 위 기능 단추를 바로 사용하세요.")
+        self.status=tk.StringVar(value="준비"); tk.Label(self.root,textvariable=self.status,bg="#111827",fg="#f1f5f9",anchor="w",font=("Malgun Gothic",8),padx=10,pady=5).pack(fill="x",side="bottom")
+
+    def auto_open_hancom(self):
+        try:
+            if find_hwp_window():
+                return
+            result = open_hancom(create_new_document=False)
+            if result.get("ok") and result.get("reason") == "launched":
+                self.status.set("한글 새 창을 여는 중...")
+            elif result.get("reason") == "hwp-not-found":
+                self.status.set("한글 미감지 · [한글 열기]에서 확인")
+        except Exception:
+            pass
+
+    def open_hancom_ui(self):
+        try:
+            result = open_hancom(create_new_document=False)
+            if result.get("ok"):
+                self.status.set("한글을 열었습니다." if result.get("reason") == "launched" else "열려 있는 한글로 이동")
+                return
+            if result.get("reason") == "hwp-not-found":
+                self.messagebox.showerror(APP_TITLE, "한글(Hwp.exe)을 찾지 못했습니다.\n한컴오피스 설치 상태를 확인하세요.")
+                self.status.set("Hwp.exe를 찾지 못했습니다.")
+                return
+            raise RuntimeError(result.get("error") or str(result))
+        except Exception as e:
+            self.error(e)
+
+    def new_hancom_document(self):
+        try:
+            result = open_hancom(create_new_document=True)
+            if result.get("ok"):
+                self.status.set("새 한글 문서를 열었습니다.")
+                return
+            if result.get("reason") == "hwp-not-found":
+                self.messagebox.showerror(APP_TITLE, "새 문서를 열 수 없습니다.\n한글(Hwp.exe)을 찾지 못했습니다.")
+                return
+            raise RuntimeError(result.get("error") or "새 문서 실행에 실패했습니다.")
+        except Exception as e:
+            self.error(e)
+
+    def clear(self):
+        for w in self.work.winfo_children(): w.destroy()
+    def show(self,text,title="작업 패널"):
+        self.work_title.config(text=title); self.clear(); self.tk.Label(self.work,text=text,bg="white",fg="#667085",font=("Malgun Gothic",8),justify="left",anchor="w",wraplength=500).pack(fill="x",pady=3)
+    def require(self):
+        if self.source is None: raise RuntimeError("먼저 HWPX 문서를 연결하세요.")
+        return self.source
+    def link(self):
+        p=self.filedialog.askopenfilename(filetypes=[("HWPX","*.hwpx")]);
+        if not p:return
+        path=Path(p); self.engine.parse(path); self.source,self.source_hash=path,sha256(path); self.status_badge.config(text="● HWPX 연결",bg="#ecfdf5",fg="#166534"); self.doc_label.config(text=path.name); self.status.set("문서 연결 완료"); self.document_analysis()
+    def document_analysis(self):
+        try:
+            x=self.engine.parse(self.require()); self.show(f"제목: {x['title'] or '-'}\n문단 {len(x['paragraphs'])} · 표 {len(x['tables'])} · Field {len(x['fields'])}","문서 분석"); self.status.set("문서 분석 완료")
+        except Exception as e:self.error(e)
+    def style_analysis(self):
+        try:
+            x=self.engine.parse(self.require()); self.show(f"글꼴 {len(x['fonts'])} · 글자 스타일 {len(x['charStyles'])}\n이미지 {x['images']} · 수식 {x['equations']}","양식 분석")
+        except Exception as e:self.error(e)
+    def document_info(self):
+        try:
+            p=self.require();x=self.engine.parse(p);self.show(f"{p.name}\nHWPX {x['version'] or '-'}\n문단 {len(x['paragraphs'])} · 표 {len(x['tables'])}\nField {len(x['fields'])} · 이미지 {x['images']} · 수식 {x['equations']}","문서 정보")
+        except Exception as e:self.error(e)
+    def table_check(self):
+        try:
+            x=self.engine.parse(self.require());empty=sum(1 for t in x['tables'] for c in t['cells'] if not c['text'].strip());merged=sum(1 for t in x['tables'] for c in t['cells'] if c['rowSpan']>1 or c['colSpan']>1);lines=[f"표 {len(x['tables'])}개 · 빈셀 {empty} · 병합셀 {merged}"]+[f"{i}. {t['rows']}행 × {t['cols']}열" for i,t in enumerate(x['tables'][:6],1)];self.show("\n".join(lines),"표 검사")
+        except Exception as e:self.error(e)
+    def render_fields(self,fields):
+        self.work_title.config(text="기존 양식으로 작성");self.clear();self.field_vars={}
+        for f in fields[:8]:
+            row=self.tk.Frame(self.work,bg="white");row.pack(fill="x",pady=2);self.tk.Label(row,text=f.name,width=11,anchor="w",bg="white",font=("Malgun Gothic",8,"bold")).pack(side="left");v=self.tk.StringVar(value=f.value);self.field_vars[f.name]=v;self.tk.Entry(row,textvariable=v,font=("Malgun Gothic",8),relief="solid",bd=1).pack(side="left",fill="x",expand=True,ipady=4);self.tk.Label(row,text=f"{round(f.confidence*100)}%",bg="white",fg="#98a2b3",font=("Malgun Gothic",7)).pack(side="right",padx=(5,0))
+        self.tk.Button(self.work,text="새 파일로 적용",command=self.apply_fields,relief="flat",bg="#111827",fg="white",pady=7).pack(fill="x",pady=(7,0))
+    def auto_write(self):
+        try:self.render_fields(self.engine.parse(self.require())["fields"])
+        except Exception as e:self.error(e)
+    def apply_fields(self):
+        try:
+            p=self.require();out=self.filedialog.asksaveasfilename(initialdir=str(p.parent),initialfile=f"{datetime.now():%Y%m%d}_{p.stem}_작성본.hwpx",defaultextension=".hwpx",filetypes=[("HWPX","*.hwpx")]);
+            if not out:return
+            r=self.engine.write_fields(p,Path(out),{k:v.get() for k,v in self.field_vars.items()});
+            if not all([r['sourceUnchanged'],r['valuesVerified'],r['structurePreserved']]):raise RuntimeError(str(r))
+            self.show(f"새 문서 작성 완료\n{out}\n\n원본 보호 PASS · 값 검증 PASS · 구조 보존 PASS","작성 완료")
+        except Exception as e:self.error(e)
+    def batch_replace(self):
+        try:
+            p=self.require();old=self.simpledialog.askstring(APP_TITLE,"찾을 문자열:",parent=self.root)
+            if old is None:return
+            new=self.simpledialog.askstring(APP_TITLE,"바꿀 문자열:",parent=self.root)
+            if new is None:return
+            out=self.filedialog.asksaveasfilename(initialdir=str(p.parent),initialfile=f"{datetime.now():%Y%m%d}_{p.stem}_치환본.hwpx",defaultextension=".hwpx",filetypes=[("HWPX","*.hwpx")]);
+            if not out:return
+            r=self.engine.batch_replace(p,Path(out),old,new);self.show(f"치환 {r['occurrences']}건\n원본 보호 {'PASS' if r['sourceUnchanged'] else 'FAIL'}\n구조 보존 {'PASS' if r['structurePreserved'] else 'FAIL'}\n\n{out}","일괄 치환")
+    
