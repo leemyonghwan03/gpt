@@ -1,0 +1,143 @@
+t Exception:
+            pass
+
+    return None, "not-found"
+
+
+def find_hwp_window() -> int | None:
+    if sys.platform != "win32":
+        return None
+    import win32gui
+    result = None
+
+    def cb(hwnd, _):
+        nonlocal result
+        if result is not None or not win32gui.IsWindowVisible(hwnd):
+            return
+        title = (win32gui.GetWindowText(hwnd) or "").lower()
+        if "한글" in title or ".hwp" in title or ".hwpx" in title:
+            result = int(hwnd)
+
+    win32gui.EnumWindows(cb, None)
+    return result
+
+
+def focus_hwp_window(hwnd: int) -> bool:
+    try:
+        import win32con
+        import win32gui
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        win32gui.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def send_new_document(hwnd: int) -> bool:
+    """Ctrl+N in Hangul: File > New / new document."""
+    try:
+        focus_hwp_window(hwnd)
+        from pywinauto.keyboard import send_keys
+        send_keys("^n", pause=0.05)
+        return True
+    except Exception:
+        return False
+
+
+def open_hancom(*, create_new_document: bool = False, force_new_process: bool = False) -> dict:
+    """
+    Open Hangul or create a blank document.
+    - Existing Hangul + normal open: bring it forward.
+    - Existing Hangul + new document: Ctrl+N.
+    - No Hangul: start Hwp.exe, then Ctrl+N for explicit new document.
+    """
+    if sys.platform != "win32":
+        return {"ok": False, "reason": "non-windows"}
+
+    hwnd = find_hwp_window()
+    if hwnd and not force_new_process:
+        if create_new_document:
+            ok = send_new_document(hwnd)
+            return {"ok": ok, "reason": "ctrl-n-existing" if ok else "ctrl-n-failed", "hwnd": hwnd}
+        focus_hwp_window(hwnd)
+        return {"ok": True, "reason": "already-open", "hwnd": hwnd}
+
+    exe, source = discover_hwp_exe()
+    if not exe:
+        return {"ok": False, "reason": "hwp-not-found", "discovery": source}
+
+    try:
+        proc = subprocess.Popen(
+            [exe],
+            cwd=str(Path(exe).parent),
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+    except Exception as exc:
+        return {"ok": False, "reason": "launch-failed", "error": f"{type(exc).__name__}: {exc}"}
+
+    # Explicit new document: after Hwp has created a window, send Ctrl+N.
+    if create_new_document:
+        deadline = time.time() + 8.0
+        target = None
+        while time.time() < deadline:
+            time.sleep(0.25)
+            target = find_hwp_window()
+            if target:
+                break
+        if target:
+            send_new_document(target)
+
+    return {"ok": True, "reason": "launched", "pid": proc.pid, "executable": exe, "discovery": source}
+
+
+
+def windows_probe() -> dict:
+    import tkinter  # noqa
+    import win32api  # noqa
+    import win32con  # noqa
+    import win32gui
+    import win32process  # noqa
+    import pythoncom  # noqa
+    import pywinauto  # noqa
+    hwnd = win32gui.GetForegroundWindow()
+    return {"hwnd": int(hwnd or 0), "title": win32gui.GetWindowText(hwnd) if hwnd else ""}
+
+
+class App:
+    def __init__(self, auto_open_hancom=True):
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, simpledialog, ttk
+        self.tk=tk; self.filedialog=filedialog; self.messagebox=messagebox; self.simpledialog=simpledialog; self.ttk=ttk
+        self.engine=HwpxEngine(); self.source=None; self.source_hash=None; self.field_vars={}
+        self.root=tk.Tk(); self.root.title(APP_TITLE); self.root.geometry("610x780+80+60"); self.root.minsize(550,650); self.root.configure(bg="#f3f5f8"); self.root.attributes("-topmost",True)
+        self._build()
+        if auto_open_hancom:
+            self.root.after(650, self.auto_open_hancom)
+
+    def _btn(self,parent,text,command,ready=True):
+        return self.tk.Button(parent,text=text if ready else text+"  ·",command=command,relief="flat",bd=0,bg="#eef3f8" if ready else "#f7f8fa",fg="#172033" if ready else "#98a2b3",font=("Malgun Gothic",8,"bold" if ready else "normal"),padx=5,pady=8)
+
+    def _build(self):
+        tk=self.tk
+        top=tk.Frame(self.root,bg="#111827",padx=14,pady=11); top.pack(fill="x")
+        tk.Label(top,text="Document Assistant",bg="#111827",fg="white",font=("Malgun Gothic",15,"bold")).pack(anchor="w")
+        tk.Label(top,text="범정부 오피스형 문서 업무 Companion",bg="#111827",fg="#cbd5e1",font=("Malgun Gothic",8)).pack(anchor="w")
+        main=tk.Frame(self.root,bg="#f3f5f8",padx=12,pady=10); main.pack(fill="both",expand=True)
+        ctx=tk.Frame(main,bg="white",padx=10,pady=9,highlightthickness=1,highlightbackground="#e1e5eb"); ctx.pack(fill="x",pady=(0,8))
+        row=tk.Frame(ctx,bg="white"); row.pack(fill="x")
+        self.status_badge=tk.Label(row,text="● HWPX 대기",bg="#f2f4f7",fg="#667085",font=("Malgun Gothic",8,"bold"),padx=8,pady=3); self.status_badge.pack(side="left")
+        self.doc_label=tk.Label(row,text="현재 문서 없음",bg="white",fg="#172033",font=("Malgun Gothic",9,"bold"),anchor="w"); self.doc_label.pack(side="left",fill="x",expand=True,padx=8)
+        tk.Button(row,text="새 문서",command=self.new_hancom_document,relief="flat",bg="#e8eef5",fg="#172033",padx=8,pady=5).pack(side="right",padx=(4,0))
+        tk.Button(row,text="한글 열기",command=self.open_hancom_ui,relief="flat",bg="#e8eef5",fg="#172033",padx=8,pady=5).pack(side="right",padx=(4,0))
+        tk.Button(row,text="문서 연결",command=self.link,relief="flat",bg="#111827",fg="white",padx=9,pady=5).pack(side="right")
+        quick=tk.Frame(main,bg="white",padx=10,pady=8,highlightthickness=1,highlightbackground="#e1e5eb"); quick.pack(fill="x",pady=(0,8))
+        tk.Label(quick,text=f"빠른 실행  ·  사용 가능 {READY_ACTION_COUNT}/{ACTION_COUNT}",bg="white",fg="#172033",font=("Malgun Gothic",9,"bold")).pack(anchor="w")
+        qgrid=tk.Frame(quick,bg="white"); qgrid.pack(fill="x",pady=(6,0))
+        for c in range(3): qgrid.grid_columnconfigure(c,weight=1)
+        for i,(label,cmd) in enumerate([("문서 분석",self.document_analysis),("자동작성",self.auto_write),("일괄 치환",self.batch_replace),("표 검사",self.table_check),("저장 전 검사",self.preflight),("원본 복제",self.clone)]):
+            self._btn(qgrid,label,cmd,True).grid(row=i//3,column=i%3,sticky="ew",padx=3,pady=3)
+        tabs=self.ttk.Notebook(main); tabs.pack(fill="x",pady=(0,8))
+        command_map={"문서 분석":self.document_analysis,"양식 분석":self.style_analysis,"문서 정보":self.document_info,"일괄 치환":self.batch_replace,"날짜/담당자 변경":self.auto_write,"표 구조 분석":self.table_check,"빈 셀 검사":self.table_check,"병합셀 검사":self.table_check,"기존 양식으로 작성":self.auto_write,"Field 자동 감지":self.auto_write,"원본 복제":self.clone,"파일명 자동 추천":self.filename,"템플릿 정보":self.template_info,"저장 전 검사":self.preflight,"원본 보호 확인":self.guard,"문서 구조 검사":self.document_info,"빈 Field 검사":self.auto_write,"패키지 무결성":self.preflight,"객체 현황":self.document_info}
+        for category,actions in ACTIONS.items():
+            frame=tk.Frame(tabs,bg="white",padx=5,
