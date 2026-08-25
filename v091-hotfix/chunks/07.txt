@@ -1,0 +1,65 @@
+"save"):
+                b.click_input();clicked=True;break
+    except Exception:pass
+    if not clicked:
+        try:dlg.set_focus();send_hwp_keys("{ENTER}");clicked=True
+        except Exception:pass
+    deadline=time.time()+10
+    while time.time()<deadline:
+        if validate_hwpx_file(target):return True
+        time.sleep(.2)
+    return False
+
+
+def create_new_hwpx() -> tuple[Path,str]:
+    target=next_hwpx_path()
+    session=create_new_hwpx_com(target)
+    if session is not None:return target,"COM"
+    if create_new_hwpx_uia(target):return target,"UIA"
+    raise RuntimeError("새 한글 문서를 HWPX로 자동 저장하지 못했습니다.")
+
+
+def table_keys(kind:str) -> bool:
+    if not focus_hwp():return False
+    seq={"auto":TABLE_SELECT_ALL_KEYS+"wh{ESC}","width":TABLE_SELECT_ALL_KEYS+"w{ESC}","height":TABLE_SELECT_ALL_KEYS+"h{ESC}"}[kind]
+    send_hwp_keys(seq);return True
+
+
+def windows_probe() -> dict:
+    import tkinter  # noqa
+    import win32api  # noqa
+    import win32con  # noqa
+    import win32gui
+    import win32process  # noqa
+    import pythoncom  # noqa
+    import pywinauto  # noqa
+    hwnd = win32gui.GetForegroundWindow()
+    return {"hwnd": int(hwnd or 0), "title": win32gui.GetWindowText(hwnd) if hwnd else ""}
+
+
+class App:
+    def __init__(self, auto_open_hancom=True):
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, simpledialog, ttk
+        self.tk=tk; self.filedialog=filedialog; self.messagebox=messagebox; self.simpledialog=simpledialog; self.ttk=ttk
+        self.engine=HwpxEngine(); self.source=None; self.source_hash=None; self.field_vars={}
+        self.root=tk.Tk(); self.root.title(APP_TITLE); self.root.geometry("600x790+80+60"); self.root.minsize(540,650); self.root.configure(bg="#f3f5f8"); self.root.attributes("-topmost",True)
+        self._build()
+        if auto_open_hancom:self.root.after(700,self.auto_open_hancom)
+
+    def _btn(self,parent,text,command,ready=True):
+        return self.tk.Button(parent,text=text if ready else text+"  ·",command=command,relief="flat",bd=0,bg="#eef3f8" if ready else "#f7f8fa",fg="#172033" if ready else "#98a2b3",font=("Malgun Gothic",8,"bold" if ready else "normal"),padx=5,pady=8)
+
+    def _build(self):
+        tk=self.tk
+        top=tk.Frame(self.root,bg="#111827",padx=14,pady=11); top.pack(fill="x")
+        tk.Label(top,text="Document Assistant",bg="#111827",fg="white",font=("Malgun Gothic",15,"bold")).pack(anchor="w")
+        tk.Label(top,text="범정부 오피스형 문서 업무 Companion",bg="#111827",fg="#cbd5e1",font=("Malgun Gothic",8)).pack(anchor="w")
+        main=tk.Frame(self.root,bg="#f3f5f8",padx=12,pady=10); main.pack(fill="both",expand=True)
+        ctx=tk.Frame(main,bg="white",padx=10,pady=9,highlightthickness=1,highlightbackground="#e1e5eb"); ctx.pack(fill="x",pady=(0,8))
+        row=tk.Frame(ctx,bg="white"); row.pack(fill="x")
+        self.status_badge=tk.Label(row,text="● HWPX 대기",bg="#f2f4f7",fg="#667085",font=("Malgun Gothic",8,"bold"),padx=8,pady=3); self.status_badge.pack(side="left")
+        self.doc_label=tk.Label(row,text="현재 문서 없음",bg="white",fg="#172033",font=("Malgun Gothic",9,"bold"),anchor="w"); self.doc_label.pack(side="left",fill="x",expand=True,padx=8)
+        tk.Button(row,text="새 문서",command=self.new_document,relief="flat",bg="#dbeafe",fg="#1d4ed8",padx=8,pady=5).pack(side="right",padx=(4,0))
+        tk.Button(row,text="한글 열기",command=self.open_hancom,relief="flat",bg="#e8eef5",fg="#172033",padx=8,pady=5).pack(side="right",padx=(4,0))
+        tk.Button(row,
