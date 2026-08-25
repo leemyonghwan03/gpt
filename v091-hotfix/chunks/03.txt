@@ -1,0 +1,73 @@
+iter():
+            if lname(node) == "p" and node.get("id") == str(para_id):
+                return node
+        return None
+
+    def write_fields(self, source: Path, output: Path, values: dict[str, str]) -> dict:
+        before_hash = sha256(source)
+        parsed = self.parse(source)
+        field_map = {f.name: f for f in parsed["fields"]}
+        edits = {}
+        for name, value in values.items():
+            if name not in field_map:
+                continue
+            f = field_map[name]
+            edits.setdefault(f.part, []).append((f, str(value)))
+        if not edits:
+            raise ValueError("적용할 Field가 없습니다.")
+        if source.resolve() == output.resolve():
+            raise ValueError("원본으로 덮어쓸 수 없습니다.")
+
+        with ZipFile(source, "r") as zin:
+            infos = zin.infolist()
+            patched = {}
+            for part, items in edits.items():
+                root = safe_xml(zin.read(part))
+                for f, new_value in items:
+                    p = self._find_para(root, f.paragraph_id)
+                    if p is None:
+                        raise ValueError(f"문단 Locator 실패: {f.name}")
+                    runs = [c for c in p if lname(c) == "run"]
+                    if f.run_index is not None:
+                        if f.run_index >= len(runs):
+                            raise ValueError(f"Run Locator 실패: {f.name}")
+                        text_nodes = [n for n in runs[f.run_index].iter() if lname(n) == "t"]
+                        if not text_nodes:
+                            raise ValueError(f"Text node 없음: {f.name}")
+                        text_nodes[0].text = new_value
+                        for n in text_nodes[1:]: n.text = ""
+                    else:
+                        replaced = False
+                        for run in runs:
+                            for n in run.iter():
+                                if lname(n) == "t" and n.text and f.old_value in n.text:
+                                    n.text = n.text.replace(f.old_value, new_value, 1)
+                                    replaced = True
+                                    break
+                            if replaced: break
+                        if not replaced:
+                            raise ValueError(f"Field 치환 실패: {f.name}")
+                patched[part] = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with ZipFile(output, "w") as zout:
+                for info in infos:
+                    zout.writestr(info, patched.get(info.filename, zin.read(info.filename)))
+
+        validate_zip(output)
+        after = self.parse(output)
+        after_fields = {f.name: f.value for f in after["fields"]}
+        return {
+            "sourceUnchanged": sha256(source) == before_hash,
+            "valuesVerified": all(after_fields.get(k) == str(v) for k, v in values.items() if k in field_map),
+            "structurePreserved": (
+                len(parsed["paragraphs"]) == len(after["paragraphs"])
+                and len(parsed["tables"]) == len(after["tables"])
+                and len(parsed["fonts"]) == len(after["fonts"])
+                and len(parsed["charStyles"]) == len(after["charStyles"])
+                and parsed["images"] == after["images"]
+                and parsed["equations"] == after["equations"]
+            ),
+            "output": str(output), "changedParts": sorted(patched),
+        }
+
+    def batch_replac
