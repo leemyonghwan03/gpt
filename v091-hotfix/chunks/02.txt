@@ -1,0 +1,62 @@
+idx}", "text": "".join(r["text"] for r in run_data), "part": part, "runs": run_data})
+
+                    for tbl in [n for n in p.iter() if lname(n) == "tbl"]:
+                        cells = []
+                        max_row = max_col = -1
+                        for tc in [n for n in tbl.iter() if lname(n) == "tc"]:
+                            addr = next((c for c in tc if lname(c) == "cellAddr"), None)
+                            span = next((c for c in tc if lname(c) == "cellSpan"), None)
+                            row = int(addr.get("rowAddr", "0")) if addr is not None else 0
+                            col = int(addr.get("colAddr", "0")) if addr is not None else 0
+                            rs = int(span.get("rowSpan", "1")) if span is not None else 1
+                            cs = int(span.get("colSpan", "1")) if span is not None else 1
+                            text = "".join((n.text or "") for n in tc.iter() if lname(n) == "t")
+                            cells.append({"row": row, "col": col, "rowSpan": rs, "colSpan": cs, "text": text})
+                            max_row = max(max_row, row + rs - 1)
+                            max_col = max(max_col, col + cs - 1)
+                        tables.append({"rows": max_row + 1 if cells else 0, "cols": max_col + 1 if cells else 0, "cells": cells})
+
+        fields = self.detect_fields(paragraphs)
+        title = metadata.get("title") or next((p["text"] for p in paragraphs if p["text"].strip()), None)
+        return {
+            "version": version, "metadata": metadata, "title": title,
+            "paragraphs": paragraphs, "tables": tables, "fields": fields,
+            "fonts": fonts, "charStyles": char_styles,
+            "images": images, "equations": equations, "parts": info["names"],
+        }
+
+    def detect_fields(self, paragraphs: list[dict]) -> list[Field]:
+        result = []
+        for p in paragraphs:
+            text = re.sub(r"\s+", " ", p["text"]).strip()
+            if not text:
+                continue
+            found = False
+            runs = p["runs"]
+            if len(runs) >= 2:
+                for split in range(1, len(runs)):
+                    left = re.sub(r"\s+", " ", "".join(r["text"] for r in runs[:split])).strip()
+                    right = re.sub(r"\s+", " ", "".join(r["text"] for r in runs[split:])).strip()
+                    m = re.match(r"^\s*([가-힣A-Za-z0-9_ /·().\-]{1,40}?)\s*[:：]\s*$", left)
+                    if m and right:
+                        label = m.group(1).strip()
+                        conf = 0.97 if re.sub(r"\s+", "", label) in KNOWN else 0.86
+                        result.append(Field(label, right, infer_type(label, right), conf, p["part"], p["id"], split, right))
+                        found = True
+                        break
+            if found:
+                continue
+            m = LABEL_RE.match(text)
+            if m:
+                label, value = m.group(1).strip(), m.group(2).strip()
+                conf = 0.93 if re.sub(r"\s+", "", label) in KNOWN else 0.78
+                result.append(Field(label, value, infer_type(label, value), conf, p["part"], p["id"], None, value))
+        best = {}
+        for f in result:
+            k = (re.sub(r"\s+", "", f.name), f.value)
+            if k not in best or f.confidence > best[k].confidence:
+                best[k] = f
+        return sorted(best.values(), key=lambda x: (-x.confidence, x.name))
+
+    def _find_para(self, root, para_id):
+        for node in root.
