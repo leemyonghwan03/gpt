@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import traceback
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZIP_STORED, ZipFile
+
+from lxml import etree
+
+VERSION = "0.8.1"
+APP_TITLE = f"Document Assistant v{VERSION}"
+MIMETYPE = "application/hwp+zip"
+
+ACTIONS = {
+    "문서": [
+        ("문서 분석", True), ("양식 분석", True), ("문서 정보", True), ("일괄 치환", True),
+        ("날짜/담당자 변경", True), ("문서 자동 정리", False), ("문서 비교", False), ("HWP ↔ HWPX", False),
+    ],
+    "표": [
+        ("표 구조 분석", True), ("빈 셀 검사", True), ("병합셀 검사", True), ("표 자동 정리", False),
+        ("열 너비 맞춤", False), ("행 높이 맞춤", False), ("머리행 강조", False), ("Excel → 한글", False),
+    ],
+    "작성": [
+        ("기존 양식으로 작성", True), ("Field 자동 감지", True), ("원본 복제", True), ("파일명 자동 추천", True),
+        ("템플릿 정보", True), ("반복문서 생성", False), ("표 데이터 채우기", False), ("AI 초안 작성", False),
+    ],
+    "검사": [
+        ("저장 전 검사", True), ("원본 보호 확인", True), ("문서 구조 검사", True), ("빈 Field 검사", True),
+        ("패키지 무결성", True), ("객체 현황", True), ("진단 로그", False), ("Native 연결 상태", False),
+    ],
+}
+ACTION_COUNT = sum(len(v) for v in ACTIONS.values())
+READY_ACTION_COUNT = sum(1 for v in ACTIONS.values() for _, ready in v if ready)
+
+
+def frozen_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def safe_xml(data: bytes):
+    return etree.fromstring(
+        data,
+        parser=etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+            huge_tree=False,
+            recover=False,
+        ),
+    )
+
+
+def lname(node) -> str:
+    return etree.QName(node).localname
+
+
+def validate_zip(path: Path) -> dict:
+    with ZipFile(path) as zf:
+        infos = zf.infolist()
+        if len(infos) > 10000:
+            raise ValueError("ZIP entry limit exceeded")
+        total = 0
+        seen = set()
+        for info in infos:
+            name = info.filename.replace("\\", "/")
+            if name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError(f"unsafe ZIP path: {name}")
+            if name in seen:
+                raise ValueError(f"duplicate ZIP entry: {name}")
+            seen.add(name)
+            total += info.file_size
+            if info.file_size > 128 * 1024 * 1024:
+                raise ValueError(f"entry too large: {name}")
+            if total > 512 * 1024 * 1024:
+                raise ValueError("ZIP total size limit exceeded")
+            if info.compress_size and info.file_size > 1024 * 1024:
+                if info.file_size / info.compress_size > 200:
+                    raise ValueError(f"suspicious compression ratio: {name}")
+        bad = zf.testzip()
+        if bad:
+            raise ValueError(f"CRC failure: {bad}")
+        return {"entries": len(infos), "names": [i.filename for i in infos]}
+
+
+@dataclass
+class Field:
+    name: str
+    value: str
+    field_type: str
+    confidence: float
+    part: str
+    paragraph_id: str | None
+    run_index: int | None
+    old_value: str
+
+
+KNOWN = {
+    "작성일": "date", "작성일자": "date", "일자": "date", "날짜": "date",
+    "점검일": "date", "점검일자": "date", "작성자": "text", "담당자": "text",
+    "부서": "text", "소속": "text", "대상": "text", "점검대상": "text",
+    "결과": "text", "점검결과": "text", "조치사항": "multiline_text", "비고": "text",
+}
+LABEL_RE = re.compile(r"^\s*([가-힣A-Za-z0-9_ /·().\-]{1,40}?)\s*[:：]\s*(.+?)\s*$")
+DATE_RE = re.compile(r"^\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}\.?$")
+
+
+def infer_type(label: str, value: str) -> str:
+    compact = re.sub(r"\s+", "", label)
+    if compact in KNOWN and KNOWN[compact] == "date":
+        return "date"
+    if DATE_RE.match(value.strip()):
+        return "date"
+    if re.match(r"^[+-]?\d[\d,]*(?:\.\d+)?(?:\s*(?:건|명|대|개|회|%|원))?$", value.strip()):
+        return "number"
+    if "\n" in value or len(value) > 120:
+        return "multiline_text"
+    return "text"
+
+
+class HwpxEngine:
+    def parse(self, path: Path) -> dict:
+        info = validate_zip(path)
+        paragraphs = []
+        tables = []
+        fonts = []
+        char_styles = []
+        metadata = {}
+        version = None
+        images = 0
+        equations = 0
+
+        with ZipFile(path) as zf:
+            names = zf.namelist()
+            if "version.xml" in names:
+                vr = safe_xml(zf.read("version.xml"))
+                vals = [vr.get("major"), vr.get("minor"), vr.get("micro"), vr.get("buildNumber")]
+                if all(v is not None for v in vals):
+                    version = ".".join(vals)
+
+            if "Contents/content.hpf" in names:
+                root = safe_xml(zf.read("Contents/content.hpf"))
+                for node in root.iter():
+                    if lname(node) in {"title", "creator", "date", "language"} and node.text:
+                        metadata[lname(node)] = node.text.strip()
+
+            if "Contents/header.xml" in names:
+                root = safe_xml(zf.read("Contents/header.xml"))
+                for node in root.iter():
+                    if lname(node) == "font":
+                        fonts.append({"id": node.get("id"), "face": node.get("face")})
+                    elif lname(node) == "charPr":
+                        char_styles.append({
+                            "id": node.get("id"),
+                            "height": node.get("height"),
+                            "bold": any(lname(c) == "bold" for c in node),
+                            "italic": any(lname(c) == "italic" for c in node),
+                        })
+
+            section_names = sorted(
+                [n for n in names if re.fullmatch(r"Contents/section\d+\.xml", n, re.I)],
+                key=lambda n: int(re.search(r"\d+", Path(n).stem).group())
+            )
+            for part in section_names:
+                root = safe_xml(zf.read(part))
+                images += sum(1 for n in root.iter() if lname(n) == "pic")
+                equations += sum(1 for n in root.iter() if lname(n) == "equation")
+
+                top_paras = [
+                    n for n in root.iter()
+                    if lname(n) == "p" and not any(lname(a) == "tc" for a in n.iterancestors())
+                ]
+                for pidx, p in enumerate(top_paras):
+                    runs = [c for c in p if lname(c) == "run"]
+                    run_data = []
+                    for ridx, run in enumerate(runs):
+                        texts = [n.text or "" for n in run.iter() if lname(n) == "t"]
+                        run_data.append({"text": "".join(texts), "charPrIDRef": run.get("charPrIDRef"), "runIndex": ridx})
+                    paragraphs.append({"id": p.get("id") or f
