@@ -1,0 +1,103 @@
+name: document-writer-v091-final-windows-verify
+
+on:
+  push:
+    branches:
+      - document-writer-v091-final-verify-20260825
+  workflow_dispatch:
+
+jobs:
+  windows-verify:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Reconstruct exact runtime source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem "payload/*.part" | Sort-Object Name
+          if ($parts.Count -ne 9) { throw "Expected 9 payload chunks, got $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          $bytes = [Convert]::FromBase64String($b64)
+          [IO.File]::WriteAllBytes("$PWD\runtime.tar.gz", $bytes)
+          $hash = (Get-FileHash "$PWD\runtime.tar.gz" -Algorithm SHA256).Hash.ToLower()
+          Write-Host "RUNTIME_SHA256=$hash"
+          if ($hash -ne "f894fb57c365a5367871c79853653b06dc735012181ea7f8308106380b431a0c") { throw "Runtime source SHA mismatch: $hash" }
+          python -c "import tarfile; t=tarfile.open('runtime.tar.gz','r:gz'); t.extractall('src'); print('RUNTIME_EXTRACT=PASS', len(t.getnames()))"
+          if (-not (Test-Path "src\bootstrap_companion.py")) { throw "bootstrap missing" }
+          if (-not (Test-Path "src\companion\service.py")) { throw "service missing" }
+          if (-not (Test-Path "src\companion\format_detector.py")) { throw "format detector missing" }
+          if (-not (Test-Path "src\packaging\companion_windows.spec")) { throw "spec missing" }
+
+      - name: Install exact dependencies
+        working-directory: src
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-poc.txt
+          python -c "import tkinter,lxml,win32api,win32con,win32gui,win32process,win32com.client,pythoncom,pywintypes,pywinauto; print('WINDOWS_IMPORTS=PASS')"
+
+      - name: Windows link regression tests
+        working-directory: src
+        shell: pwsh
+        run: |
+          python -m pytest -q tests/test_v091_link_regression.py tests/test_companion_service.py tests/test_bootstrap.py
+
+      - name: Python production self-test
+        working-directory: src
+        shell: pwsh
+        run: |
+          $env:DOCUMENT_WRITER_SELFTEST = "1"
+          python bootstrap_companion.py
+          if ($LASTEXITCODE -ne 0) { throw "Python production self-test failed: $LASTEXITCODE" }
+          if (-not (Test-Path "runtime_data\WINDOWS_SELFTEST_PASS.txt")) { throw "Python self-test marker missing" }
+          Get-Content "runtime_data\WINDOWS_SELFTEST_PASS.txt"
+
+      - name: Build full production Windows EXE
+        working-directory: src
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean packaging\companion_windows.spec
+          if (-not (Test-Path "dist\DocumentAssistant\DocumentAssistant.exe")) { throw "DocumentAssistant.exe missing" }
+
+      - name: Run packaged EXE self-test
+        working-directory: src
+        shell: pwsh
+        run: |
+          $env:DOCUMENT_WRITER_SELFTEST = "1"
+          $exe = Resolve-Path "dist\DocumentAssistant\DocumentAssistant.exe"
+          $proc = Start-Process -FilePath $exe -WorkingDirectory "dist\DocumentAssistant" -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            if (Test-Path "dist\DocumentAssistant\runtime_data\logs\companion_startup.log") { Get-Content "dist\DocumentAssistant\runtime_data\logs\companion_startup.log" -Tail 250 }
+            throw "Packaged EXE self-test failed: $($proc.ExitCode)"
+          }
+          $marker = "dist\DocumentAssistant\runtime_data\WINDOWS_SELFTEST_PASS.txt"
+          if (-not (Test-Path $marker)) { throw "Packaged marker missing" }
+          $text = Get-Content $marker -Raw
+          $required = @("WINDOWS_SELFTEST=PASS","VERSION=0.9.1","FROZEN=True","FULL_PROJECT_BUILD=PASS","LINK_WITHOUT_PARSE=PASS","FORMAT_DETECTOR=PASS","HWPX_PARSE=PASS","HWPX_TEMPLATE_WRITE=PASS","NEW_DOCUMENT_AUTOLINK_CODEPATH=PASS","TABLE_AUTO_FORMAT_CODEPATH=PASS")
+          foreach ($item in $required) { if (-not $text.Contains($item)) { throw "Missing marker: $item" } }
+          Get-Content $marker
+
+      - name: Archive verified build
+        working-directory: src
+        shell: pwsh
+        run: |
+          Compress-Archive "dist\DocumentAssistant\*" "DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.zip" -Force
+          $sha = (Get-FileHash "DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.zip" -Algorithm SHA256).Hash.ToLower()
+          "ARTIFACT_SHA256=$sha" | Set-Content "DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.sha256.txt"
+          Get-Item "DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.zip"
+          Get-Content "DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.sha256.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocumentAssistant-v0.9.1-Windows-x64-VERIFIED
+          path: |
+            src/DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.zip
+            src/DocumentAssistant-v0.9.1-Windows-x64-VERIFIED.sha256.txt
+          if-no-files-found: error
