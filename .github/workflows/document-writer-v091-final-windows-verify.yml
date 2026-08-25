@@ -12,7 +12,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -63,7 +62,8 @@ jobs:
         working-directory: src
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean packaging\companion_windows.spec
+          Copy-Item "packaging\companion_windows.spec" ".\companion_windows.spec" -Force
+          python -m PyInstaller --noconfirm --clean companion_windows.spec
           if (-not (Test-Path "dist\DocumentAssistant\DocumentAssistant.exe")) { throw "DocumentAssistant.exe missing" }
 
       - name: Run packaged EXE self-test
