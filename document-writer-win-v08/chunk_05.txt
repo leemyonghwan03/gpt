@@ -1,0 +1,22 @@
+ed,{"작성일":"2027.01.01","담당자":"윈도우검증","부서":"검증팀","점검대상":"서버 1대","점검결과":"양호"});assert wr['sourceUnchanged'] and wr['valuesVerified'] and wr['structurePreserved'] and sha256(source)==original_hash
+    rr=engine.batch_replace(source,replaced,"SERVER-01","SERVER-WIN");assert rr['occurrences']==1 and rr['sourceUnchanged'] and rr['structurePreserved']
+    app=App();app.root.update_idletasks();app.root.update();geometry=app.root.geometry();topmost=app.root.attributes('-topmost');app.root.destroy();assert ACTION_COUNT==32 and READY_ACTION_COUNT>=18
+    out.write_text("WINDOWS_SELFTEST=PASS\n"+f"VERSION={VERSION}\nPYTHON={sys.version}\nFROZEN={getattr(sys,'frozen',False)}\nGEOMETRY={geometry}\nTOPMOST={topmost}\nACTION_COUNT={ACTION_COUNT}\nREADY_ACTION_COUNT={READY_ACTION_COUNT}\nHWPX_PARSE=PASS\nHWPX_FIELD_DETECT=PASS\nHWPX_TABLE_INSPECT=PASS\nHWPX_TEMPLATE_WRITE=PASS\nHWPX_BATCH_REPLACE=PASS\nSOURCE_GUARD=PASS\nFOREGROUND_HWND={probe['hwnd']}\nFOREGROUND_TITLE={probe['title']}\n",encoding='utf-8');return 0
+
+
+def main() -> int:
+    parser=argparse.ArgumentParser();parser.add_argument('--selftest',action='store_true');args=parser.parse_args()
+    try:
+        if args.selftest:return selftest()
+        windows_probe();App().run();return 0
+    except Exception:
+        detail=traceback.format_exc()
+        try:(frozen_dir()/"WINDOWS_STARTUP_ERROR.txt").write_text(detail,encoding='utf-8')
+        except Exception:pass
+        if not args.selftest:
+            try:
+                import ctypes;ctypes.windll.user32.MessageBoxW(0,detail[-1800:],APP_TITLE,0x10)
+            except Exception:pass
+        return 3
+
+if __name__=='__main__':raise SystemExit(main())

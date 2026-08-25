@@ -1,0 +1,114 @@
+search(r"\d+", Path(n).stem).group())
+            )
+            for part in section_names:
+                root = safe_xml(zf.read(part))
+                images += sum(1 for n in root.iter() if lname(n) == "pic")
+                equations += sum(1 for n in root.iter() if lname(n) == "equation")
+
+                top_paras = [
+                    n for n in root.iter()
+                    if lname(n) == "p" and not any(lname(a) == "tc" for a in n.iterancestors())
+                ]
+                for pidx, p in enumerate(top_paras):
+                    runs = [c for c in p if lname(c) == "run"]
+                    run_data = []
+                    for ridx, run in enumerate(runs):
+                        texts = [n.text or "" for n in run.iter() if lname(n) == "t"]
+                        run_data.append({"text": "".join(texts), "charPrIDRef": run.get("charPrIDRef"), "runIndex": ridx})
+                    paragraphs.append({"id": p.get("id") or f"p{pidx}", "text": "".join(r["text"] for r in run_data), "part": part, "runs": run_data})
+
+                    for tbl in [n for n in p.iter() if lname(n) == "tbl"]:
+                        cells = []
+                        max_row = max_col = -1
+                        for tc in [n for n in tbl.iter() if lname(n) == "tc"]:
+                            addr = next((c for c in tc if lname(c) == "cellAddr"), None)
+                            span = next((c for c in tc if lname(c) == "cellSpan"), None)
+                            row = int(addr.get("rowAddr", "0")) if addr is not None else 0
+                            col = int(addr.get("colAddr", "0")) if addr is not None else 0
+                            rs = int(span.get("rowSpan", "1")) if span is not None else 1
+                            cs = int(span.get("colSpan", "1")) if span is not None else 1
+                            text = "".join((n.text or "") for n in tc.iter() if lname(n) == "t")
+                            cells.append({"row": row, "col": col, "rowSpan": rs, "colSpan": cs, "text": text})
+                            max_row = max(max_row, row + rs - 1)
+                            max_col = max(max_col, col + cs - 1)
+                        tables.append({"rows": max_row + 1 if cells else 0, "cols": max_col + 1 if cells else 0, "cells": cells})
+
+        fields = self.detect_fields(paragraphs)
+        title = metadata.get("title") or next((p["text"] for p in paragraphs if p["text"].strip()), None)
+        return {
+            "version": version, "metadata": metadata, "title": title,
+            "paragraphs": paragraphs, "tables": tables, "fields": fields,
+            "fonts": fonts, "charStyles": char_styles,
+            "images": images, "equations": equations, "parts": info["names"],
+        }
+
+    def detect_fields(self, paragraphs: list[dict]) -> list[Field]:
+        result = []
+        for p in paragraphs:
+            text = re.sub(r"\s+", " ", p["text"]).strip()
+            if not text:
+                continue
+            found = False
+            runs = p["runs"]
+            if len(runs) >= 2:
+                for split in range(1, len(runs)):
+                    left = re.sub(r"\s+", " ", "".join(r["text"] for r in runs[:split])).strip()
+                    right = re.sub(r"\s+", " ", "".join(r["text"] for r in runs[split:])).strip()
+                    m = re.match(r"^\s*([가-힣A-Za-z0-9_ /·().\-]{1,40}?)\s*[:：]\s*$", left)
+                    if m and right:
+                        label = m.group(1).strip()
+                        conf = 0.97 if re.sub(r"\s+", "", label) in KNOWN else 0.86
+                        result.append(Field(label, right, infer_type(label, right), conf, p["part"], p["id"], split, right))
+                        found = True
+                        break
+            if found:
+                continue
+            m = LABEL_RE.match(text)
+            if m:
+                label, value = m.group(1).strip(), m.group(2).strip()
+                conf = 0.93 if re.sub(r"\s+", "", label) in KNOWN else 0.78
+                result.append(Field(label, value, infer_type(label, value), conf, p["part"], p["id"], None, value))
+        best = {}
+        for f in result:
+            k = (re.sub(r"\s+", "", f.name), f.value)
+            if k not in best or f.confidence > best[k].confidence:
+                best[k] = f
+        return sorted(best.values(), key=lambda x: (-x.confidence, x.name))
+
+    def _find_para(self, root, para_id):
+        for node in root.iter():
+            if lname(node) == "p" and node.get("id") == str(para_id):
+                return node
+        return None
+
+    def write_fields(self, source: Path, output: Path, values: dict[str, str]) -> dict:
+        before_hash = sha256(source)
+        parsed = self.parse(source)
+        field_map = {f.name: f for f in parsed["fields"]}
+        edits = {}
+        for name, value in values.items():
+            if name not in field_map:
+                continue
+            f = field_map[name]
+            edits.setdefault(f.part, []).append((f, str(value)))
+        if not edits:
+            raise ValueError("적용할 Field가 없습니다.")
+        if source.resolve() == output.resolve():
+            raise ValueError("원본으로 덮어쓸 수 없습니다.")
+
+        with ZipFile(source, "r") as zin:
+            infos = zin.infolist()
+            patched = {}
+            for part, items in edits.items():
+                root = safe_xml(zin.read(part))
+                for f, new_value in items:
+                    p = self._find_para(root, f.paragraph_id)
+                    if p is None:
+                        raise ValueError(f"문단 Locator 실패: {f.name}")
+                    runs = [c for c in p if lname(c) == "run"]
+                    if f.run_index is not None:
+                        if f.run_index >= len(runs):
+                            raise ValueError(f"Run Locator 실패: {f.name}")
+                        text_nodes = [n for n in runs[f.run_index].iter() if lname(n) == "t"]
+                        if not text_nodes:
+                     
