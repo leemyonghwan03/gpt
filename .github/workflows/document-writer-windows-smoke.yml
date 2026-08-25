@@ -1,0 +1,77 @@
+name: document-writer-windows-smoke
+
+on:
+  push:
+    branches:
+      - document-writer-win-verify-20260825
+  workflow_dispatch:
+
+jobs:
+  verify-windows-ui:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'x64'
+
+      - name: Install dependencies
+        working-directory: document-writer-win-smoke
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -c "import tkinter,win32gui,win32com.client,pythoncom,pywinauto; print('WINDOWS_IMPORTS=PASS')"
+
+      - name: Python UI self-test
+        working-directory: document-writer-win-smoke
+        shell: pwsh
+        run: |
+          python companion_smoke.py --selftest
+          if (-not (Test-Path WINDOWS_SELFTEST_PASS.txt)) { throw 'Python UI self-test marker missing' }
+          Get-Content WINDOWS_SELFTEST_PASS.txt
+          Remove-Item WINDOWS_SELFTEST_PASS.txt
+
+      - name: Build Windows onedir EXE
+        working-directory: document-writer-win-smoke
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name DocumentAssistant `
+            --hidden-import=pythoncom `
+            --hidden-import=pywintypes `
+            --hidden-import=win32api `
+            --hidden-import=win32con `
+            --hidden-import=win32gui `
+            --hidden-import=win32process `
+            --collect-all=pywinauto `
+            companion_smoke.py
+          if (-not (Test-Path dist\DocumentAssistant\DocumentAssistant.exe)) { throw 'EXE build missing' }
+
+      - name: Packaged EXE UI self-test
+        working-directory: document-writer-win-smoke
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path 'dist\DocumentAssistant\DocumentAssistant.exe'
+          $proc = Start-Process -FilePath $exe -ArgumentList '--selftest' -WorkingDirectory 'dist\DocumentAssistant' -PassThru -Wait
+          if ($proc.ExitCode -ne 0) {
+            if (Test-Path 'dist\DocumentAssistant\WINDOWS_STARTUP_ERROR.txt') { Get-Content 'dist\DocumentAssistant\WINDOWS_STARTUP_ERROR.txt' }
+            throw "Packaged EXE self-test failed: $($proc.ExitCode)"
+          }
+          if (-not (Test-Path 'dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt')) { throw 'Packaged EXE self-test marker missing' }
+          Get-Content 'dist\DocumentAssistant\WINDOWS_SELFTEST_PASS.txt'
+
+      - name: Archive verified build
+        working-directory: document-writer-win-smoke
+        shell: pwsh
+        run: |
+          Compress-Archive 'dist\DocumentAssistant\*' 'DocumentAssistant-Windows-x64-VERIFIED.zip' -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DocumentAssistant-Windows-x64-VERIFIED
+          path: document-writer-win-smoke/DocumentAssistant-Windows-x64-VERIFIED.zip
+          if-no-files-found: error
