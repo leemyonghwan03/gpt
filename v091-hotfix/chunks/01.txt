@@ -1,0 +1,80 @@
+date", "점검일자": "date", "작성자": "text", "담당자": "text",
+    "부서": "text", "소속": "text", "대상": "text", "점검대상": "text",
+    "결과": "text", "점검결과": "text", "조치사항": "multiline_text", "비고": "text",
+}
+LABEL_RE = re.compile(r"^\s*([가-힣A-Za-z0-9_ /·().\-]{1,40}?)\s*[:：]\s*(.+?)\s*$")
+DATE_RE = re.compile(r"^\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}\.?$")
+
+
+def infer_type(label: str, value: str) -> str:
+    compact = re.sub(r"\s+", "", label)
+    if compact in KNOWN and KNOWN[compact] == "date":
+        return "date"
+    if DATE_RE.match(value.strip()):
+        return "date"
+    if re.match(r"^[+-]?\d[\d,]*(?:\.\d+)?(?:\s*(?:건|명|대|개|회|%|원))?$", value.strip()):
+        return "number"
+    if "\n" in value or len(value) > 120:
+        return "multiline_text"
+    return "text"
+
+
+class HwpxEngine:
+    def parse(self, path: Path) -> dict:
+        info = validate_zip(path)
+        paragraphs = []
+        tables = []
+        fonts = []
+        char_styles = []
+        metadata = {}
+        version = None
+        images = 0
+        equations = 0
+
+        with ZipFile(path) as zf:
+            names = zf.namelist()
+            if "version.xml" in names:
+                vr = safe_xml(zf.read("version.xml"))
+                vals = [vr.get("major"), vr.get("minor"), vr.get("micro"), vr.get("buildNumber")]
+                if all(v is not None for v in vals):
+                    version = ".".join(vals)
+
+            if "Contents/content.hpf" in names:
+                root = safe_xml(zf.read("Contents/content.hpf"))
+                for node in root.iter():
+                    if lname(node) in {"title", "creator", "date", "language"} and node.text:
+                        metadata[lname(node)] = node.text.strip()
+
+            if "Contents/header.xml" in names:
+                root = safe_xml(zf.read("Contents/header.xml"))
+                for node in root.iter():
+                    if lname(node) == "font":
+                        fonts.append({"id": node.get("id"), "face": node.get("face")})
+                    elif lname(node) == "charPr":
+                        char_styles.append({
+                            "id": node.get("id"),
+                            "height": node.get("height"),
+                            "bold": any(lname(c) == "bold" for c in node),
+                            "italic": any(lname(c) == "italic" for c in node),
+                        })
+
+            section_names = sorted(
+                [n for n in names if re.fullmatch(r"Contents/section\d+\.xml", n, re.I)],
+                key=lambda n: int(re.search(r"\d+", Path(n).stem).group())
+            )
+            for part in section_names:
+                root = safe_xml(zf.read(part))
+                images += sum(1 for n in root.iter() if lname(n) == "pic")
+                equations += sum(1 for n in root.iter() if lname(n) == "equation")
+
+                top_paras = [
+                    n for n in root.iter()
+                    if lname(n) == "p" and not any(lname(a) == "tc" for a in n.iterancestors())
+                ]
+                for pidx, p in enumerate(top_paras):
+                    runs = [c for c in p if lname(c) == "run"]
+                    run_data = []
+                    for ridx, run in enumerate(runs):
+                        texts = [n.text or "" for n in run.iter() if lname(n) == "t"]
+                        run_data.append({"text": "".join(texts), "charPrIDRef": run.get("charPrIDRef"), "runIndex": ridx})
+                    paragraphs.append({"id": p.get("id") or f"p{pidx}", "text": "".join(r["text"] for r in run_data), "part": part, "runs": run_data})
